@@ -24,6 +24,9 @@ class EmbedderResult:
     text: list[str]
     # The optional metadata (shape: [num_sequences])
     metadata: list[dict[str, Any]] | None = None
+    # Optional: multiple named embeddings (for multi-representation encoders)
+    # Each key maps to a numpy array of shape [num_sequences, embedding_size]
+    named_embeddings: dict[str, np.ndarray] | None = None
 
 
 class Embedder(Protocol):

@@ -22,6 +22,8 @@ class JsonlDatasetConfig(BaseConfig):
 
     # The name of the text field in the jsonl file
     text_field: str = 'text'
+    # Whether to preserve all other fields as metadata
+    preserve_metadata: bool = True
     # Number of data workers for batching.
     num_data_workers: int = 4
     # Inference batch size.
@@ -63,11 +65,19 @@ class JsonlDataset:
         # Extract the text data
         data = [item[self.config.text_field] for item in content]
 
+        # Extract metadata (all fields except the text field)
+        metadata = None
+        if self.config.preserve_metadata:
+            metadata = [
+                {k: v for k, v in item.items() if k != self.config.text_field}
+                for item in content
+            ]
+
         # Instantiate the dataloader
         return DataLoader(
             pin_memory=self.config.pin_memory,
             batch_size=self.config.batch_size,
             num_workers=self.config.num_data_workers,
-            dataset=InMemoryDataset(data),
+            dataset=InMemoryDataset(data, metadata=metadata),
             collate_fn=DataCollator(encoder.tokenizer),
         )
