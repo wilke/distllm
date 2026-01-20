@@ -7,6 +7,7 @@ structural information learned during structure prediction.
 
 from __future__ import annotations
 
+from typing import Any
 from typing import Literal
 
 import torch
@@ -14,6 +15,32 @@ from transformers import BatchEncoding
 from transformers import PreTrainedTokenizer
 
 from distllm.utils import BaseConfig
+
+
+class EsmFoldTokenizerWrapper:
+    """Wrapper for ESMFold tokenizer that disables special tokens.
+
+    ESMFold requires sequences WITHOUT special tokens (no BOS/EOS).
+    This wrapper ensures add_special_tokens=False is always used.
+    """
+
+    def __init__(self, tokenizer: PreTrainedTokenizer) -> None:
+        """Wrap the tokenizer."""
+        self._tokenizer = tokenizer
+
+    def __call__(
+        self,
+        text: str | list[str],
+        **kwargs: Any,
+    ) -> BatchEncoding:
+        """Tokenize with add_special_tokens=False."""
+        # Force no special tokens for ESMFold
+        kwargs['add_special_tokens'] = False
+        return self._tokenizer(text, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate attribute access to wrapped tokenizer."""
+        return getattr(self._tokenizer, name)
 
 
 class EsmFoldEncoderConfig(BaseConfig):
@@ -105,15 +132,19 @@ class EsmFoldEncoder:
         model.to(device)
 
         # Load tokenizer (ESMFold uses ESM-2 tokenizer)
+        # IMPORTANT: ESMFold requires add_special_tokens=False
         tokenizer = AutoTokenizer.from_pretrained(
             config.pretrained_model_name_or_path,
         )
         tokenizer.model_max_length = config.max_length
 
+        # Wrap tokenizer to enforce no special tokens
+        wrapped_tokenizer = EsmFoldTokenizerWrapper(tokenizer)
+
         # Store config and model
         self.config = config
         self.model = model
-        self._tokenizer = tokenizer
+        self._tokenizer = wrapped_tokenizer
         self._representation = config.representation
         self._multi_representation = config.multi_representation
 
@@ -157,8 +188,8 @@ class EsmFoldEncoder:
         return self._embedding_sizes[self._representation]
 
     @property
-    def tokenizer(self) -> PreTrainedTokenizer:
-        """Get the tokenizer of the encoder."""
+    def tokenizer(self) -> EsmFoldTokenizerWrapper:
+        """Get the tokenizer of the encoder (wrapped to disable special tokens)."""
         return self._tokenizer
 
     def encode(
