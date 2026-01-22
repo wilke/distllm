@@ -14,6 +14,8 @@ from distllm.embed.encoders.esmc import EsmCambrianEncoder
 from distllm.embed.encoders.esmc import EsmCambrianEncoderConfig
 from distllm.embed.encoders.esmfold import EsmFoldEncoder
 from distllm.embed.encoders.esmfold import EsmFoldEncoderConfig
+from distllm.embed.encoders.nvembed import NVEmbedEncoder
+from distllm.embed.encoders.nvembed import NVEmbedEncoderConfig
 from distllm.registry import registry
 from distllm.utils import BaseConfig
 
@@ -22,6 +24,7 @@ EncoderConfigs = Union[
     EsmCambrianEncoderConfig,
     EsmFoldEncoderConfig,
     AutoEncoderConfig,
+    NVEmbedEncoderConfig,
 ]
 
 STRATEGIES: dict[str, tuple[type[BaseConfig], type[Encoder]]] = {
@@ -29,6 +32,7 @@ STRATEGIES: dict[str, tuple[type[BaseConfig], type[Encoder]]] = {
     'esmc': (EsmCambrianEncoderConfig, EsmCambrianEncoder),
     'esmfold': (EsmFoldEncoderConfig, EsmFoldEncoder),
     'auto': (AutoEncoderConfig, AutoEncoder),
+    'nvembed': (NVEmbedEncoderConfig, NVEmbedEncoder),
 }
 
 

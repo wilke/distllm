@@ -6,17 +6,20 @@ from typing import Any
 from typing import Union
 
 from distllm.embed.poolers.base import Pooler
+from distllm.embed.poolers.identity import IdentityPooler
+from distllm.embed.poolers.identity import IdentityPoolerConfig
 from distllm.embed.poolers.last_token import LastTokenPooler
 from distllm.embed.poolers.last_token import LastTokenPoolerConfig
 from distllm.embed.poolers.mean import MeanPooler
 from distllm.embed.poolers.mean import MeanPoolerConfig
 from distllm.utils import BaseConfig
 
-PoolerConfigs = Union[MeanPoolerConfig, LastTokenPoolerConfig]
+PoolerConfigs = Union[MeanPoolerConfig, LastTokenPoolerConfig, IdentityPoolerConfig]
 
 STRATEGIES: dict[str, tuple[type[BaseConfig], type[Pooler]]] = {
     'mean': (MeanPoolerConfig, MeanPooler),
     'last_token': (LastTokenPoolerConfig, LastTokenPooler),
+    'identity': (IdentityPoolerConfig, IdentityPooler),
 }
 
 
@@ -26,6 +29,7 @@ def get_pooler(kwargs: dict[str, Any]) -> Pooler:
     Currently supports the following strategies:
     - mean
     - last_token
+    - identity
 
     Parameters
     ----------

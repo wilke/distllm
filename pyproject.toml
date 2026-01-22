@@ -72,6 +72,13 @@ docs = [
     "mkdocstrings-python==1.8.0",
     "mike",
 ]
+# NV-Embed requires specific versions due to API compatibility issues
+# Install with: pip install distllm[nvembed]
+nvembed = [
+    "transformers==4.42.4",
+    "accelerate==0.30.0",
+    "einops",
+]
 
 [tool.codespell]
 skip = """
