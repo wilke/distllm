@@ -31,7 +31,7 @@ def embedding_worker(  # noqa: PLR0913
 ) -> None:
     """Embed a single file and save a numpy array with embeddings."""
     # Imports are here since this function is called in a parsl process
-
+    import sys
     from uuid import uuid4
 
     from distllm.embed import get_dataset
@@ -39,6 +39,7 @@ def embedding_worker(  # noqa: PLR0913
     from distllm.embed import get_encoder
     from distllm.embed import get_pooler
     from distllm.embed import get_writer
+    from distllm.embed.datasets import EmptyDatasetError
     from distllm.timer import Timer
 
     # Time the worker function
@@ -60,9 +61,15 @@ def embedding_worker(  # noqa: PLR0913
     # Initialize the writer
     writer = get_writer(writer_kwargs)
 
-    # Initialize the dataloader
-    with Timer('loaded-dataset', input_path):
-        dataloader = dataset.get_dataloader(input_path, encoder)
+    # Initialize the dataloader (may raise EmptyDatasetError if all filtered)
+    try:
+        with Timer('loaded-dataset', input_path):
+            dataloader = dataset.get_dataloader(input_path, encoder)
+    except EmptyDatasetError as e:
+        # All sequences were filtered out - skip this file gracefully
+        print(f'[SKIPPED] {e}', file=sys.stderr)
+        timer.stop()
+        return
 
     # Compute the embeddings
     with Timer('computed-embeddings', input_path):

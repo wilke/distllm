@@ -77,6 +77,9 @@ def compute_embeddings(
         # Increment the output buffer index by the batch size
         idx += batch_size
 
+    # Convert to float32 if bfloat16 (numpy doesn't support bf16)
+    if all_embeddings.dtype == torch.bfloat16:
+        all_embeddings = all_embeddings.float()
     return all_embeddings.numpy()
 
 
@@ -135,7 +138,13 @@ def compute_multi_embeddings(
 
         idx += batch_size
 
-    return {name: arr.numpy() for name, arr in all_embeddings.items()}
+    # Convert to float32 if bfloat16 (numpy doesn't support bf16)
+    result = {}
+    for name, arr in all_embeddings.items():
+        if arr.dtype == torch.bfloat16:
+            arr = arr.float()
+        result[name] = arr.numpy()
+    return result
 
 
 class FullSequenceEmbedderConfig(BaseConfig):

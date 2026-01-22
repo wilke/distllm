@@ -8,9 +8,8 @@
 
 # An input directory containing the JSONL files with protein sequences.
 # Each JSONL line should have a 'sequence' field with the amino acid sequence.
-input_dir: /homes/ogokdemir/lambda_stor/OlekPaper/swissprot_data/jsonls/protein_sequences
-# An output directory to save the embeddings.
-output_dir: /homes/ogokdemir/lambda_stor/OlekPaper/swissprot_data/encodings/esmfold
+input_dir: /home/ogokdemir/data/OlekPaper/jsonls/protein_sequences/bin_08
+output_dir: /home/ogokdemir/data/OlekPaper/encodings/structures/esmfold/bin_08
 
 # A set of glob patterns to match the input files.
 glob_patterns: ['*.jsonl']
@@ -20,16 +19,25 @@ dataset_config:
   name: jsonl
   text_field: sequence  # Field containing the protein sequence
   preserve_metadata: true  # Keep primary_accession, pmids, path, etc.
-  batch_size: 4  # Small batch size due to ESMFold memory requirements
-  num_data_workers: 4
+  batch_size: 2  # Small batch size due to ESMFold memory requirements
+  num_data_workers: 0
+  # Filter out sequences shorter than min_sequence_length
+  min_sequence_length: 10
+  # Filter out sequences longer than max_sequence_length (DROP, not truncate)
+  max_sequence_length: 1024
+  # Field to log when sequences are dropped
+  id_field: primary_accession
+  # Filter out sequences with non-standard amino acids (B, Z, X, U, J, O, etc.)
+  # ESM tokenizer only supports the 20 standard amino acids (ACDEFGHIKLMNPQRSTVWY)
+  filter_non_standard_aa: true
 
 # Settings for the ESMFold encoder.
 # IMPORTANT: We extract from the STRUCTURE MODULE, not ESM-2 stem.
 encoder_config:
   name: esmfold
   pretrained_model_name_or_path: facebook/esmfold_v1
-  half_precision: true
-  max_length: 1024  # Maximum protein length (ESMFold supports up to 2048)
+  half_precision: true  # Saves ~50% VRAM; pTM instability is now handled gracefully
+  max_length: 2048  # Set high to avoid truncation (filtering happens at dataset level)
 
   # Option 1: Single representation (representation field)
   #   - 'states': Folding trunk hidden states (3D STRUCTURE)
@@ -40,7 +48,7 @@ encoder_config:
 
   # Option 2: Multi-representation mode (RECOMMENDED)
   # Writes SEPARATE columns to the HuggingFace dataset:
-  #   - embeddings_structure: folding trunk states [1024-dim]
+  #   - embeddings_structure: folding trunk states [384-dim]
   #   - embeddings_pairwise: pairwise contacts [128-dim]
   multi_representation: true
 
@@ -49,6 +57,8 @@ encoder_config:
 # Settings for the pooler (mean-pool per-residue embeddings to get one per protein).
 pooler_config:
   name: mean
+  # ESMFold doesn't use special tokens (BOS/EOS), so don't exclude first/last residues
+  exclude_special_tokens: false
 
 # Settings for the embedder.
 embedder_config:
