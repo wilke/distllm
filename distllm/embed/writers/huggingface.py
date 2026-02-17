@@ -20,11 +20,17 @@ def _generate_dataset(
     embeddings: np.ndarray,
     text: list[str],
     metadata: list[dict[str, Any]] | None,
+    named_embeddings: dict[str, np.ndarray] | None = None,
 ) -> Iterator[dict[str, str | np.ndarray | Any]]:
     """Generate a dataset from the embeddings, text, and metadata."""
     for idx, (text_, embedding) in enumerate(zip(text, embeddings)):
         # Always include the text and the embeddings
         item = {'text': text_, 'embeddings': embedding}
+
+        # Add named embeddings if available (multi-representation mode)
+        if named_embeddings is not None:
+            for name, emb_array in named_embeddings.items():
+                item[f'embeddings_{name}'] = emb_array[idx]
 
         # Add metadata if available
         if metadata is not None:
@@ -64,8 +70,9 @@ class HuggingFaceWriter:
             result.embeddings,
             result.text,
             result.metadata,
+            result.named_embeddings,
         ))
-        
+
         # Create dataset from dictionary (avoids temporary file issues on NFS)
         dataset = Dataset.from_list(data)
 

@@ -80,6 +80,64 @@ def compute_embeddings(
     return all_embeddings.numpy()
 
 
+@torch.no_grad()
+def compute_multi_embeddings(
+    dataloader: DataLoader,
+    encoder: Encoder,
+    pooler: Pooler,
+    normalize: bool = False,
+) -> dict[str, np.ndarray]:
+    """Compute pooled hidden embeddings for multi-representation encoders.
+
+    Parameters
+    ----------
+    dataloader : DataLoader
+        The dataloader to use for batching the data.
+    encoder : Encoder
+        The encoder to use for inference. Must return a dict of tensors.
+    pooler : Pooler
+        The pooler to use for pooling the embeddings.
+    normalize : bool, optional
+        Whether to normalize the embeddings, by default False.
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        A dict mapping embedding names to numpy arrays of pooled embeddings.
+    """
+    num_embeddings = len(dataloader.dataset)
+    embedding_sizes = encoder.embedding_size  # dict[str, int]
+
+    # Initialize storage for each embedding type
+    all_embeddings: dict[str, torch.Tensor] = {
+        name: torch.empty((num_embeddings, size), dtype=encoder.dtype)
+        for name, size in embedding_sizes.items()
+    }
+
+    idx = 0
+
+    for batch in tqdm(dataloader):
+        inputs = batch.to(encoder.device)
+
+        # Get dict of embeddings from encoder
+        embeddings_dict = encoder.encode(inputs)
+
+        batch_size = inputs.attention_mask.shape[0]
+
+        # Pool each embedding type separately
+        for name, embeddings in embeddings_dict.items():
+            pooled = pooler.pool(embeddings, inputs.attention_mask)
+
+            if normalize:
+                pooled = F.normalize(pooled, p=2, dim=-1)
+
+            all_embeddings[name][idx : idx + batch_size, :] = pooled.cpu()
+
+        idx += batch_size
+
+    return {name: arr.numpy() for name, arr in all_embeddings.items()}
+
+
 class FullSequenceEmbedderConfig(BaseConfig):
     """Configuration for the full sequence embedder."""
 
@@ -119,6 +177,31 @@ class FullSequenceEmbedder:
         EmbedderResult
             Dataclass with the embeddings, text, and optional metadata.
         """
+        # Check if encoder returns multiple embeddings (dict embedding_size)
+        embedding_size = encoder.embedding_size
+        is_multi = isinstance(embedding_size, dict)
+
+        if is_multi:
+            # Multi-representation mode: compute each embedding separately
+            named_embeddings = compute_multi_embeddings(
+                dataloader=dataloader,
+                encoder=encoder,
+                pooler=pooler,
+                normalize=self.config.normalize_embeddings,
+            )
+
+            # Use the first embedding as the primary (for backward compat)
+            first_name = next(iter(named_embeddings))
+            primary_embeddings = named_embeddings[first_name]
+
+            return EmbedderResult(
+                embeddings=primary_embeddings,
+                text=dataloader.dataset.data,
+                metadata=dataloader.dataset.metadata,
+                named_embeddings=named_embeddings,
+            )
+
+        # Standard single-embedding mode
         embeddings = compute_embeddings(
             dataloader=dataloader,
             encoder=encoder,
@@ -126,7 +209,6 @@ class FullSequenceEmbedder:
             normalize=self.config.normalize_embeddings,
         )
 
-        # Return the result
         return EmbedderResult(
             embeddings=embeddings,
             text=dataloader.dataset.data,

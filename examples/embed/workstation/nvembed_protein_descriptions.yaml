@@ -1,0 +1,55 @@
+# Example config for embedding with NVIDIA NV-Embed-v2
+# NV-Embed uses a trained latent attention pooler, so we use the
+# 'nvembed' encoder with 'identity' pooler.
+#
+# Reference: https://huggingface.co/nvidia/NV-Embed-v2
+#
+# IMPORTANT: NV-Embed requires specific package versions.
+# Install with: pip install distllm[nvembed]
+
+# An input directory containing the files to embed.
+input_dir: /homes/ogokdemir/lambda_stor/OlekPaper/swissprot_data/jsonls/protein_descriptions
+# An output directory to save the embeddings.
+output_dir: /homes/ogokdemir/lambda_stor/OlekPaper/swissprot_data/encodings/protein_descriptions/nvembed_v2
+# A set of glob patterns to match the input files.
+glob_patterns: ['*.jsonl']
+
+# Settings for reading the input files.
+dataset_config:
+  name: jsonl
+  batch_size: 4
+  num_data_workers: 0
+
+# Settings for the encoder.
+# NV-Embed has a built-in latent attention pooler that is trained
+# as part of the model. We use the nvembed encoder to leverage this.
+encoder_config:
+  name: nvembed
+  pretrained_model_name_or_path: nvidia/NV-Embed-v2
+  # Optional instruction prefix for retrieval tasks
+  # For general embedding without specific task, leave empty
+  # For retrieval: "Given a question, retrieve passages that answer the question"
+  instruction: ''
+  max_length: 32768
+  half_precision: false
+  quantization: true
+
+# Settings for the pooler.
+# Use identity pooler since NV-Embed already pools internally
+pooler_config:
+  name: identity
+
+# Settings for the embedder.
+embedder_config:
+  name: full_sequence
+  normalize_embeddings: true
+
+# Settings for the writer.
+writer_config:
+  name: huggingface
+
+# Settings for the parsl compute backend.
+compute_config:
+  name: workstation
+  available_accelerators: ["0", "1", "2", "3", "4", "5", "6", "7"]
+  retries: 0
