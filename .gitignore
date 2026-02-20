@@ -364,3 +364,15 @@ GitHub.sublime-settings
 
 #IRIS dataset
 *.data
+
+# User-specific config files
+examples/embed/workstation/*.yaml
+examples/chat/argo-proxy-chat/*.yaml
+examples/chat/*.yaml
+
+# Secret keys
+.webui_secret_key
+*/.webui_secret_key
+
+# Output logs
+*.out
