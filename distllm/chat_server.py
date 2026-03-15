@@ -7,8 +7,8 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import AsyncGenerator
 from typing import Iterable
+from typing import Iterator
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -168,42 +168,59 @@ def _build_response_payload(
 
 
 def _stream_response(
-    payload: ChatCompletionResponse,
-) -> AsyncGenerator[str, None]:
-    """Convert a JSON payload into an SSE stream with a single delta."""
-    chunk = {
-        'id': payload.id,
+    *,
+    response_id: str,
+    created: int,
+    model: str,
+    text_deltas: Iterable[str],
+) -> Iterator[str]:
+    """Convert text deltas into OpenAI-compatible SSE chat chunks."""
+    role_chunk = {
+        'id': response_id,
         'object': 'chat.completion.chunk',
-        'created': payload.created,
-        'model': payload.model,
+        'created': created,
+        'model': model,
         'choices': [
             {
                 'index': 0,
-                'delta': payload.choices[0].message,
+                'delta': {'role': 'assistant'},
                 'finish_reason': None,
             },
         ],
     }
+    yield f'data: {json.dumps(role_chunk)}\n\n'
+
+    for delta_text in text_deltas:
+        chunk = {
+            'id': response_id,
+            'object': 'chat.completion.chunk',
+            'created': created,
+            'model': model,
+            'choices': [
+                {
+                    'index': 0,
+                    'delta': {'content': delta_text},
+                    'finish_reason': None,
+                },
+            ],
+        }
+        yield f'data: {json.dumps(chunk)}\n\n'
+
     final_chunk = {
-        'id': payload.id,
+        'id': response_id,
         'object': 'chat.completion.chunk',
-        'created': payload.created,
-        'model': payload.model,
+        'created': created,
+        'model': model,
         'choices': [
             {
                 'index': 0,
                 'delta': {},
-                'finish_reason': payload.choices[0].finish_reason,
+                'finish_reason': 'stop',
             },
         ],
     }
-
-    async def generator() -> AsyncGenerator[str, None]:
-        yield f'data: {json.dumps(chunk)}\n\n'
-        yield f'data: {json.dumps(final_chunk)}\n\n'
-        yield 'data: [DONE]\n\n'
-
-    return generator()
+    yield f'data: {json.dumps(final_chunk)}\n\n'
+    yield 'data: [DONE]\n\n'
 
 
 @app.on_event('startup')
@@ -315,6 +332,31 @@ async def chat_completions(
     if retrieval_score_threshold is None:
         retrieval_score_threshold = DEFAULT_SCORE_THRESHOLD
 
+    if request.stream:
+        model_name = request.model or getattr(rag_model.generator, 'model', 'unknown')
+        response_id = f'chatcmpl-{uuid.uuid4()}'
+        created = int(time.time())
+
+        text_deltas = await run_in_threadpool(
+            rag_model.generate_stream,
+            [latest_user_message],
+            prompt_template,
+            retrieval_top_k,
+            retrieval_score_threshold,
+            max_tokens,
+            temperature,
+            DEFAULT_DEBUG_RETRIEVAL,
+        )
+        return StreamingResponse(
+            _stream_response(
+                response_id=response_id,
+                created=created,
+                model=model_name,
+                text_deltas=text_deltas,
+            ),
+            media_type='text/event-stream',
+        )
+
     response_list = await run_in_threadpool(
         rag_model.generate,
         [latest_user_message],
@@ -332,11 +374,5 @@ async def chat_completions(
         or getattr(rag_model.generator, 'model', 'unknown'),
         assistant_message=assistant_response,
     )
-
-    if request.stream:
-        return StreamingResponse(
-            _stream_response(payload),
-            media_type='text/event-stream',
-        )
 
     return JSONResponse(payload.model_dump())

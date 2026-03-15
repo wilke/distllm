@@ -82,7 +82,8 @@ class WorkstationConfig(BaseComputeConfig):
     """Number of GPU accelerators to use."""
     worker_port_range: tuple[int, int] = (10000, 20000)
     """Port range."""
-    retries: int = 1
+    retries: int = 0
+    """Number of retries for failed tasks. Set to 0 to disable retries."""
     label: str = 'htex'
 
     def get_config(self, run_dir: PathLike) -> Config:
