@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from typing import Iterator
 
 import numpy as np
@@ -39,7 +41,7 @@ class PromptTemplate:
         scores: list[list[float]],
     ) -> list[str]:
         """Preprocess the texts before sending to the model."""
-        raise NotImplementedError("Subclasses should implement this method")
+        raise NotImplementedError('Subclasses should implement this method')
 
 
 class ConversationPromptTemplate(PromptTemplate):
@@ -67,24 +69,24 @@ class ConversationPromptTemplate(PromptTemplate):
         the new question. If any retrieval contexts are found, we append them.
         """
         if not texts:
-            return [""]  # No user input, return empty prompt.
+            return ['']  # No user input, return empty prompt.
 
         # The latest user query:
         user_input = texts[0]
 
         # Build the conversation string
-        conversation_str = ""
+        conversation_str = ''
         for speaker, text in self.conversation_history:
-            conversation_str += f"{speaker}: {text}\n"
+            conversation_str += f'{speaker}: {text}\n'
         # Add the new user question
-        conversation_str += f"User: {user_input}\nAssistant:"
+        conversation_str += f'User: {user_input}\nAssistant:'
 
         # Optionally, append retrieved context if it exists
         if contexts and len(contexts) > 0 and len(contexts[0]) > 0:
             # contexts[0] is the top-k retrieval results for this query
-            conversation_str += "\n\n[Context from retrieval]\n"
+            conversation_str += '\n\n[Context from retrieval]\n'
             for doc in contexts[0]:
-                conversation_str += f"{doc}\n"
+                conversation_str += f'{doc}\n'
 
         return [conversation_str]
 
@@ -97,27 +99,27 @@ class VLLMGeneratorConfig(BaseConfig):
 
     server: str = Field(
         ...,
-        description="Cels machine you are running on, e.g, rbdgx1",
+        description='Cels machine you are running on, e.g, rbdgx1',
     )
     port: int = Field(
         ...,
-        description="The port vLLM is listening to.",
+        description='The port vLLM is listening to.',
     )
     api_key: str = Field(
         ...,
-        description="The API key for vLLM server, e.g., CELS",
+        description='The API key for vLLM server, e.g., CELS',
     )
     model: str = Field(
         ...,
-        description="The model that vLLM server is running.",
+        description='The model that vLLM server is running.',
     )
     temperature: float = Field(
         0.0,
-        description="Freeze off the temperature to the keep model grounded.",
+        description='Freeze off the temperature to the keep model grounded.',
     )
     max_tokens: int = Field(
         16384,
-        description="The maximum number of tokens to generate.",
+        description='The maximum number of tokens to generate.',
     )
 
     def get_generator(self) -> VLLMGenerator:
@@ -144,38 +146,60 @@ class VLLMGenerator:
         prompt: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
-    ) -> str:
-        """Send a prompt to the local vLLM server and return the completion."""
+    ) -> dict[str, Any]:
+        """Send a prompt to the local vLLM server and return the completion.
+
+        Returns a dict with keys:
+            text: the generated text
+            prompt_tokens: number of tokens in the prompt
+            completion_tokens: number of tokens in the completion
+            total_latency_s: wall-clock seconds for the request
+        """
         temp_to_use = self.temperature if temperature is None else temperature
         tokens_to_use = self.max_tokens if max_tokens is None else max_tokens
 
-        url = f"http://{self.server}.cels.anl.gov:{self.port}/v1/chat/completions"
+        url = f'http://{self.server}.cels.anl.gov:{self.port}/v1/chat/completions'
         headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {self.api_key}',
         }
         payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt},
+            'model': self.model,
+            'messages': [
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
+                {'role': 'user', 'content': prompt},
             ],
-            "temperature": temp_to_use,
-            "max_tokens": tokens_to_use,
+            'temperature': temp_to_use,
+            'max_tokens': tokens_to_use,
         }
 
+        t0 = time.perf_counter()
         response = requests.post(
             url,
             headers=headers,
             data=json.dumps(payload),
         )
+        total_latency_s = time.perf_counter() - t0
+
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+
         if response.status_code == 200:  # noqa: PLR2004
-            result = response.json()["choices"][0]["message"]["content"]
+            resp_json = response.json()
+            result = resp_json['choices'][0]['message']['content']
+            usage = resp_json.get('usage', {})
+            prompt_tokens = usage.get('prompt_tokens')
+            completion_tokens = usage.get('completion_tokens')
         else:
-            print(f"Error: {response.status_code}")
+            print(f'Error: {response.status_code}')
             result = response.text
 
-        return result
+        return {
+            'text': result,
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_latency_s': round(total_latency_s, 4),
+        }
 
     def generate_stream(
         self,
@@ -187,20 +211,20 @@ class VLLMGenerator:
         temp_to_use = self.temperature if temperature is None else temperature
         tokens_to_use = self.max_tokens if max_tokens is None else max_tokens
 
-        url = f"http://{self.server}.cels.anl.gov:{self.port}/v1/chat/completions"
+        url = f'http://{self.server}.cels.anl.gov:{self.port}/v1/chat/completions'
         headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {self.api_key}',
         }
         payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": prompt},
+            'model': self.model,
+            'messages': [
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
+                {'role': 'user', 'content': prompt},
             ],
-            "temperature": temp_to_use,
-            "max_tokens": tokens_to_use,
-            "stream": True,
+            'temperature': temp_to_use,
+            'max_tokens': tokens_to_use,
+            'stream': True,
         }
 
         with requests.post(
@@ -214,20 +238,20 @@ class VLLMGenerator:
                 if not raw_line:
                     continue
                 line = raw_line.strip()
-                if not line.startswith("data: "):
+                if not line.startswith('data: '):
                     continue
                 data = line[6:]
-                if data == "[DONE]":
+                if data == '[DONE]':
                     break
                 try:
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                choices = chunk.get("choices", [])
+                choices = chunk.get('choices', [])
                 if not choices:
                     continue
-                delta = choices[0].get("delta", {})
-                text_delta = delta.get("content")
+                delta = choices[0].get('delta', {})
+                text_delta = delta.get('content')
                 if text_delta:
                     yield text_delta
 
@@ -236,27 +260,27 @@ class ArgoGeneratorConfig(BaseConfig):
     """Configuration for the Argo generator using OpenAI client."""
 
     model: str = Field(
-        default_factory=lambda: os.getenv("MODEL", "argo:gpt-4o"),
-        description="The model name for Argo proxy.",
+        default_factory=lambda: os.getenv('MODEL', 'argo:gpt-4o'),
+        description='The model name for Argo proxy.',
     )
     base_url: str = Field(
         default_factory=lambda: os.getenv(
-            "BASE_URL",
-            "http://localhost:56267",
+            'BASE_URL',
+            'http://localhost:56267',
         ),
-        description="The base URL for the Argo proxy server.",
+        description='The base URL for the Argo proxy server.',
     )
     api_key: str = Field(
-        "whatever+random",
-        description="The API key for Argo proxy (can be any string).",
+        'whatever+random',
+        description='The API key for Argo proxy (can be any string).',
     )
     temperature: float = Field(
         0.0,
-        description="Freeze off the temperature to keep model grounded.",
+        description='Freeze off the temperature to keep model grounded.',
     )
     max_tokens: int = Field(
         16384,
-        description="The maximum number of tokens to generate.",
+        description='The maximum number of tokens to generate.',
     )
 
     def get_generator(self) -> ArgoGenerator:
@@ -278,7 +302,7 @@ class ArgoGenerator:
         # Initialize OpenAI client with Argo proxy settings
         self.client = openai.OpenAI(
             api_key=config.api_key,
-            base_url=f"{config.base_url}/v1",
+            base_url=f'{config.base_url}/v1',
         )
 
     def generate(
@@ -286,16 +310,27 @@ class ArgoGenerator:
         prompt: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
-    ) -> str:
-        """Send a prompt to the Argo proxy and return the completion."""
+    ) -> dict[str, Any]:
+        """Send a prompt to the Argo proxy and return the completion.
+
+        Returns a dict with keys:
+            text: the generated text
+            prompt_tokens: number of tokens in the prompt
+            completion_tokens: number of tokens in the completion
+            total_latency_s: wall-clock seconds for the request
+        """
         temp_to_use = self.temperature if temperature is None else temperature
         tokens_to_use = self.max_tokens if max_tokens is None else max_tokens
 
         messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt},
+            {'role': 'system', 'content': 'You are a helpful assistant.'},
+            {'role': 'user', 'content': prompt},
         ]
 
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+
+        t0 = time.perf_counter()
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -303,12 +338,22 @@ class ArgoGenerator:
                 temperature=temp_to_use,
                 max_tokens=tokens_to_use,
             )
+            total_latency_s = time.perf_counter() - t0
             result = response.choices[0].message.content
+            if response.usage is not None:
+                prompt_tokens = response.usage.prompt_tokens
+                completion_tokens = response.usage.completion_tokens
         except Exception as e:
-            print(f"Error calling Argo proxy: {e}")
-            result = f"Error: {e!s}"
+            total_latency_s = time.perf_counter() - t0
+            print(f'Error calling Argo proxy: {e}')
+            result = f'Error: {e!s}'
 
-        return result
+        return {
+            'text': result,
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_latency_s': round(total_latency_s, 4),
+        }
 
     def generate_stream(
         self,
@@ -321,8 +366,8 @@ class ArgoGenerator:
         tokens_to_use = self.max_tokens if max_tokens is None else max_tokens
 
         messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt},
+            {'role': 'system', 'content': 'You are a helpful assistant.'},
+            {'role': 'user', 'content': prompt},
         ]
 
         try:
@@ -341,8 +386,8 @@ class ArgoGenerator:
                 if text_delta:
                     yield text_delta
         except Exception as e:
-            print(f"Error calling Argo proxy (stream): {e}")
-            yield f"Error: {e!s}"
+            print(f'Error calling Argo proxy (stream): {e}')
+            yield f'Error: {e!s}'
 
 
 # Directly use the OpenAI API, instead of the argo-proxy models.
@@ -352,21 +397,21 @@ class OpenAIAPIGeneratorConfig(BaseConfig):
     """
 
     model: str = Field(
-        default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4.1"),
-        description="OpenAI model name",
+        default_factory=lambda: os.getenv('OPENAI_MODEL', 'gpt-4.1'),
+        description='OpenAI model name',
     )
     api_key: str = Field(
-        default_factory=lambda: os.getenv("OPENAI_API_KEY"),
-        description="OpenAI API key",
+        default_factory=lambda: os.getenv('OPENAI_API_KEY'),
+        description='OpenAI API key',
     )
     base_url: str | None = Field(
-        default_factory=lambda: os.getenv("OPENAI_BASE_URL", None),
-        description="Optional: override OpenAI base URL (e.g., Azure)",
+        default_factory=lambda: os.getenv('OPENAI_BASE_URL', None),
+        description='Optional: override OpenAI base URL (e.g., Azure)',
     )
     temperature: float = Field(0.0)
     max_tokens: int = Field(16384)
 
-    def get_generator(self) -> "OpenAIAPIGenerator":
+    def get_generator(self) -> 'OpenAIAPIGenerator':
         return OpenAIAPIGenerator(config=self)
 
 
@@ -381,8 +426,8 @@ class OpenAIAPIGenerator:
         # Validate API key
         if not config.api_key:
             raise ValueError(
-                "OpenAI API key is required. Set OPENAI_API_KEY environment variable "
-                "or provide it in the config file.",
+                'OpenAI API key is required. Set OPENAI_API_KEY environment variable '
+                'or provide it in the config file.',
             )
 
         # Initialize OpenAI client
@@ -401,15 +446,27 @@ class OpenAIAPIGenerator:
         prompt: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
-    ) -> str:
+    ) -> dict[str, Any]:
+        """Send a prompt to the OpenAI API and return the completion.
+
+        Returns a dict with keys:
+            text: the generated text
+            prompt_tokens: number of tokens in the prompt
+            completion_tokens: number of tokens in the completion
+            total_latency_s: wall-clock seconds for the request
+        """
         temperature = self.temperature if temperature is None else temperature
         max_tokens = self.max_tokens if max_tokens is None else max_tokens
 
         messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt},
+            {'role': 'system', 'content': 'You are a helpful assistant.'},
+            {'role': 'user', 'content': prompt},
         ]
 
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+
+        t0 = time.perf_counter()
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -417,6 +474,12 @@ class OpenAIAPIGenerator:
                 temperature=temperature,
                 max_completion_tokens=max_tokens,
             )
+            total_latency_s = time.perf_counter() - t0
+
+            if response.usage is not None:
+                prompt_tokens = response.usage.prompt_tokens
+                completion_tokens = response.usage.completion_tokens
+
             content = response.choices[0].message.content
 
             # Handle case where content might be None
@@ -425,23 +488,29 @@ class OpenAIAPIGenerator:
                 finish_reason = response.choices[0].finish_reason
                 # Debug: print full response structure for diagnosis
                 print(
-                    f"DEBUG: Response content is None. Finish reason: {finish_reason}"
+                    f'DEBUG: Response content is None. Finish reason: {finish_reason}'
                 )
-                print(f"DEBUG: Full response structure: {response}")
-                return f"[No content returned. Finish reason: {finish_reason}]"
+                print(f'DEBUG: Full response structure: {response}')
+                content = f'[No content returned. Finish reason: {finish_reason}]'
 
             # Debug: check if content is empty string
-            if content == "":
+            if content == '':
                 finish_reason = response.choices[0].finish_reason
                 print(
-                    f"DEBUG: Response content is empty string. Finish reason: {finish_reason}"
+                    f'DEBUG: Response content is empty string. Finish reason: {finish_reason}'
                 )
 
-            return content
-
         except Exception as e:
-            print(f"Error calling OpenAI API: {e}")
-            return f"Error: {e}"
+            total_latency_s = time.perf_counter() - t0
+            print(f'Error calling OpenAI API: {e}')
+            content = f'Error: {e}'
+
+        return {
+            'text': content,
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_latency_s': round(total_latency_s, 4),
+        }
 
     def generate_stream(
         self,
@@ -454,8 +523,8 @@ class OpenAIAPIGenerator:
         max_tokens = self.max_tokens if max_tokens is None else max_tokens
 
         messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt},
+            {'role': 'system', 'content': 'You are a helpful assistant.'},
+            {'role': 'user', 'content': prompt},
         ]
 
         try:
@@ -474,8 +543,8 @@ class OpenAIAPIGenerator:
                 if text_delta:
                     yield text_delta
         except Exception as e:
-            print(f"Error calling OpenAI API (stream): {e}")
-            yield f"Error: {e}"
+            print(f'Error calling OpenAI API (stream): {e}')
+            yield f'Error: {e}'
 
 
 class RagGenerator:
@@ -529,32 +598,32 @@ class RagGenerator:
 
             # Debug: Print detailed retrieval information
             if debug_retrieval:
-                print("=" * 80)
-                print("🔍 RETRIEVAL DEBUG INFORMATION")
-                print("=" * 80)
-                print(f"Query: {texts[0]}")
-                print(f"Retrieved {len(results.total_indices[0])} documents")
+                print('=' * 80)
+                print('🔍 RETRIEVAL DEBUG INFORMATION')
+                print('=' * 80)
+                print(f'Query: {texts[0]}')
+                print(f'Retrieved {len(results.total_indices[0])} documents')
                 print()
 
                 # Show results structure
-                print("📊 Results structure:")
+                print('📊 Results structure:')
                 print(
-                    f"  - results.total_indices: {type(results.total_indices)}"
-                    f" (length: {len(results.total_indices)})",
+                    f'  - results.total_indices: {type(results.total_indices)}'
+                    f' (length: {len(results.total_indices)})',
                 )
                 print(
-                    f"  - results.total_scores: {type(results.total_scores)}(length: {len(results.total_scores)})",
+                    f'  - results.total_scores: {type(results.total_scores)}(length: {len(results.total_scores)})',
                 )
-                print(f"  - First query indices: {results.total_indices[0]}")
-                print(f"  - First query scores: {results.total_scores[0]}")
+                print(f'  - First query indices: {results.total_indices[0]}')
+                print(f'  - First query scores: {results.total_scores[0]}')
                 print()
 
                 # Show what columns are available in the dataset
-                print("🗂️ Available dataset columns:")
+                print('🗂️ Available dataset columns:')
                 dataset_columns = list(
                     self.retriever.faiss_index.dataset.column_names,
                 )
-                print(f"  - Columns: {dataset_columns}")
+                print(f'  - Columns: {dataset_columns}')
                 print()
 
                 # Show detailed information for each retrieved document
@@ -562,28 +631,30 @@ class RagGenerator:
                     zip(results.total_indices[0], results.total_scores[0]),
                 ):
                     print(
-                        f"📄 Document {i + 1} (Index: {idx}, Score: {score:.4f}):",
+                        f'📄 Document {i + 1} (Index: {idx}, Score: {score:.4f}):',
                     )
 
                     # Get all available attributes for this document
                     for column in dataset_columns:
                         value = self.retriever.get([idx], column)[0]
-                        if column == "text":
+                        if column == 'text':
                             # Show truncated text for readability
                             text_preview = (
-                                value[:200] + "..." if len(value) > 200 else value
+                                value[:200] + '...'
+                                if len(value) > 200
+                                else value
                             )
-                            print(f"  - {column}: {text_preview}")
-                        elif column == "embeddings":
+                            print(f'  - {column}: {text_preview}')
+                        elif column == 'embeddings':
                             # Show embedding info without printing the full array
                             print(
-                                f"  - {column}: array shape {np.array(value).shape}, dtype {np.array(value).dtype}",
+                                f'  - {column}: array shape {np.array(value).shape}, dtype {np.array(value).dtype}',
                             )
                         else:
-                            print(f"  - {column}: {value}")
+                            print(f'  - {column}: {value}')
                     print()
 
-                print("=" * 80)
+                print('=' * 80)
                 print()
 
             contexts = [
@@ -598,17 +669,24 @@ class RagGenerator:
 
         # If the verbose is true in config, print contexts.
         if self.verbose:
-            print(contexts[0][0] + "\n\n")
+            print(contexts[0][0] + '\n\n')
 
         # We only expect one output per query for now
         # (If multiple texts were passed, we would loop.)
-        result = self.generator.generate(
+        gen_result = self.generator.generate(
             prompt=prompts[0],
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        # Return as list (matching the function signature)
-        return [result]
+        # gen_result is a dict with text, prompt_tokens, completion_tokens,
+        # total_latency_s
+        metrics = {
+            'prompt_tokens': gen_result['prompt_tokens'],
+            'completion_tokens': gen_result['completion_tokens'],
+            'total_latency_s': gen_result['total_latency_s'],
+        }
+        # Return response list and metrics
+        return [gen_result['text']], metrics
 
     def generate_stream(  # noqa: PLR0913
         self,
@@ -638,11 +716,11 @@ class RagGenerator:
             )
 
             if debug_retrieval:
-                print("=" * 80)
-                print("🔍 RETRIEVAL DEBUG INFORMATION")
-                print("=" * 80)
-                print(f"Query: {texts[0]}")
-                print(f"Retrieved {len(results.total_indices[0])} documents")
+                print('=' * 80)
+                print('🔍 RETRIEVAL DEBUG INFORMATION')
+                print('=' * 80)
+                print(f'Query: {texts[0]}')
+                print(f'Retrieved {len(results.total_indices[0])} documents')
                 print()
 
             contexts = [
@@ -653,7 +731,7 @@ class RagGenerator:
 
         prompts = prompt_template.preprocess(texts, contexts, scores)
         if self.verbose and contexts:
-            print(contexts[0][0] + "\n\n")
+            print(contexts[0][0] + '\n\n')
 
         yield from self.generator.generate_stream(
             prompt=prompts[0],
@@ -672,39 +750,42 @@ class RetrievalAugmentedGenerationConfig(BaseConfig):
         VLLMGeneratorConfig | ArgoGeneratorConfig | OpenAIAPIGeneratorConfig
     ) = Field(
         ...,
-        description="Settings for the generator (VLLM or Argo)",
+        description='Settings for the generator (VLLM or Argo)',
     )
     retriever_config: RetrieverConfig | None = Field(
         None,
-        description="Settings for the retriever",
+        description='Settings for the retriever',
     )
     verbose: bool = Field(
         default=False,
-        description="Whether to print retrieved contexts in chat.",
+        description='Whether to print retrieved contexts in chat.',
     )
 
-    @model_validator(mode="before")
+    @model_validator(mode='before')
     @classmethod
     def handle_target_field(cls, data: dict) -> dict:
         """Handle _target_ field to instantiate the correct config class."""
-        if isinstance(data, dict) and "generator_config" in data:
-            gen_config_data = data["generator_config"]
+        if isinstance(data, dict) and 'generator_config' in data:
+            gen_config_data = data['generator_config']
 
             # If generator_config is a dict with _target_ field, instantiate the correct class
-            if isinstance(gen_config_data, dict) and "_target_" in gen_config_data:
-                target_class_name = gen_config_data.pop("_target_")
+            if (
+                isinstance(gen_config_data, dict)
+                and '_target_' in gen_config_data
+            ):
+                target_class_name = gen_config_data.pop('_target_')
 
                 # Map class names to config classes
                 config_class_map = {
-                    "VLLMGeneratorConfig": VLLMGeneratorConfig,
-                    "ArgoGeneratorConfig": ArgoGeneratorConfig,
-                    "OpenAIAPIGeneratorConfig": OpenAIAPIGeneratorConfig,
+                    'VLLMGeneratorConfig': VLLMGeneratorConfig,
+                    'ArgoGeneratorConfig': ArgoGeneratorConfig,
+                    'OpenAIAPIGeneratorConfig': OpenAIAPIGeneratorConfig,
                 }
 
                 if target_class_name not in config_class_map:
                     raise ValueError(
-                        f"Unknown generator config class: {target_class_name}. "
-                        f"Available: {list(config_class_map.keys())}",
+                        f'Unknown generator config class: {target_class_name}. '
+                        f'Available: {list(config_class_map.keys())}',
                     )
 
                 config_class = config_class_map[target_class_name]
@@ -714,16 +795,18 @@ class RetrievalAugmentedGenerationConfig(BaseConfig):
                 for key, value in gen_config_data.items():
                     if (
                         isinstance(value, str)
-                        and value.startswith("${env:")
-                        and value.endswith("}")
+                        and value.startswith('${env:')
+                        and value.endswith('}')
                     ):
-                        env_var = value[6:-1]  # Extract VAR_NAME from ${env:VAR_NAME}
-                        processed_data[key] = os.getenv(env_var, "")
+                        env_var = value[
+                            6:-1
+                        ]  # Extract VAR_NAME from ${env:VAR_NAME}
+                        processed_data[key] = os.getenv(env_var, '')
                     else:
                         processed_data[key] = value
 
                 # Instantiate the config class
-                data["generator_config"] = config_class(**processed_data)
+                data['generator_config'] = config_class(**processed_data)
 
         return data
 
@@ -738,7 +821,7 @@ class RetrievalAugmentedGenerationConfig(BaseConfig):
             generator = OpenAIAPIGenerator(self.generator_config)
         else:
             raise ValueError(
-                f"Unsupported generator config type: {type(self.generator_config)}",
+                f'Unsupported generator config type: {type(self.generator_config)}',
             )
 
         # Initialize the retriever
@@ -760,11 +843,11 @@ class ChatAppConfig(BaseConfig):
 
     rag_configs: RetrievalAugmentedGenerationConfig = Field(
         ...,
-        description="Settings for this RAG application.",
+        description='Settings for this RAG application.',
     )
     save_conversation_path: Path = Field(
         ...,
-        description="Directory to save the output files.",
+        description='Directory to save the output files.',
     )
 
 
@@ -801,11 +884,11 @@ def inspect_retrieval_results(
 
     # Build detailed results
     detailed_results = {
-        "query": query,
-        "query_embedding_shape": query_embeddings.shape,
-        "num_results": len(results.total_indices[0]),
-        "dataset_columns": dataset_columns,
-        "retrieved_documents": [],
+        'query': query,
+        'query_embedding_shape': query_embeddings.shape,
+        'num_results': len(results.total_indices[0]),
+        'dataset_columns': dataset_columns,
+        'retrieved_documents': [],
     }
 
     # Get detailed info for each retrieved document
@@ -813,58 +896,60 @@ def inspect_retrieval_results(
         zip(results.total_indices[0], results.total_scores[0]),
     ):
         doc_info = {
-            "rank": i + 1,
-            "dataset_index": idx,
-            "score": score,
-            "attributes": {},
+            'rank': i + 1,
+            'dataset_index': idx,
+            'score': score,
+            'attributes': {},
         }
 
         # Get all available attributes for this document
         for column in dataset_columns:
             value = retriever.get([idx], column)[0]
-            if column == "embeddings":
+            if column == 'embeddings':
                 # For embeddings, store shape and dtype info
-                doc_info["attributes"][column] = {
-                    "shape": np.array(value).shape,
-                    "dtype": str(np.array(value).dtype),
+                doc_info['attributes'][column] = {
+                    'shape': np.array(value).shape,
+                    'dtype': str(np.array(value).dtype),
                 }
             else:
-                doc_info["attributes"][column] = value
+                doc_info['attributes'][column] = value
 
-        detailed_results["retrieved_documents"].append(doc_info)
+        detailed_results['retrieved_documents'].append(doc_info)
 
     return detailed_results
 
 
 def print_retrieval_inspection(results: dict) -> None:
     """Pretty print the retrieval inspection results."""
-    print("=" * 80)
-    print("🔍 RETRIEVAL INSPECTION")
-    print("=" * 80)
-    print(f"Query: {results['query']}")
-    print(f"Query embedding shape: {results['query_embedding_shape']}")
-    print(f"Number of results: {results['num_results']}")
-    print(f"Dataset columns: {results['dataset_columns']}")
+    print('=' * 80)
+    print('🔍 RETRIEVAL INSPECTION')
+    print('=' * 80)
+    print(f'Query: {results["query"]}')
+    print(f'Query embedding shape: {results["query_embedding_shape"]}')
+    print(f'Number of results: {results["num_results"]}')
+    print(f'Dataset columns: {results["dataset_columns"]}')
     print()
 
-    for doc in results["retrieved_documents"]:
+    for doc in results['retrieved_documents']:
         print(
-            f"📄 Document {doc['rank']} (Index: {doc['dataset_index']}, Score: {doc['score']:.4f})",
+            f'📄 Document {doc["rank"]} (Index: {doc["dataset_index"]}, Score: {doc["score"]:.4f})',
         )
-        for attr_name, attr_value in doc["attributes"].items():
-            if attr_name == "text":
+        for attr_name, attr_value in doc['attributes'].items():
+            if attr_name == 'text':
                 # Truncate text for readability
                 text_preview = (
-                    attr_value[:200] + "..." if len(attr_value) > 200 else attr_value
+                    attr_value[:200] + '...'
+                    if len(attr_value) > 200
+                    else attr_value
                 )
-                print(f"  - {attr_name}: {text_preview}")
-            elif attr_name == "embeddings":
-                print(f"  - {attr_name}: {attr_value}")
+                print(f'  - {attr_name}: {text_preview}')
+            elif attr_name == 'embeddings':
+                print(f'  - {attr_name}: {attr_value}')
             else:
-                print(f"  - {attr_name}: {attr_value}")
+                print(f'  - {attr_name}: {attr_value}')
         print()
 
-    print("=" * 80)
+    print('=' * 80)
 
 
 # -----------------------------------------------------------------------------
@@ -887,39 +972,39 @@ def chat_with_model(config: ChatAppConfig) -> None:
     conversation_history: list[tuple[str, str]] = []
 
     # Print welcome message and available commands
-    print("🤖 RAG Chat Interface Started!")
-    print("Available commands:")
-    print("  - Type your questions normally for chat responses")
+    print('🤖 RAG Chat Interface Started!')
+    print('Available commands:')
+    print('  - Type your questions normally for chat responses')
     print(
-        "  - /inspect <query> - Inspect retrieval results without generating a response",
+        '  - /inspect <query> - Inspect retrieval results without generating a response',
     )
-    print("  - quit - Exit the chat")
-    print("=" * 60)
+    print('  - quit - Exit the chat')
+    print('=' * 60)
 
     while True:
-        user_input = input("You: ")
+        user_input = input('You: ')
 
         # Check for 'quit' to exit
-        if user_input.strip().lower() == "quit":
-            print("Exiting the chat...")
+        if user_input.strip().lower() == 'quit':
+            print('Exiting the chat...')
             break
 
         # Check for inspect command
-        if user_input.strip().startswith("/inspect"):
+        if user_input.strip().startswith('/inspect'):
             # Extract the query after /inspect
             query = user_input.strip()[8:].strip()  # Remove '/inspect' prefix
             if not query:
-                print("Usage: /inspect <your query>")
+                print('Usage: /inspect <your query>')
                 continue
 
             # Get the retriever from RAG model
             if rag_model.retriever is None:
-                print("❌ No retriever configured in this RAG model.")
+                print('❌ No retriever configured in this RAG model.')
                 continue
 
             # Inspect retrieval results
             print(
-                "🔍 Inspecting retrieval results (no response generation)...",
+                '🔍 Inspecting retrieval results (no response generation)...',
             )
             results = inspect_retrieval_results(
                 retriever=rag_model.retriever,
@@ -931,7 +1016,7 @@ def chat_with_model(config: ChatAppConfig) -> None:
             continue  # Don't add to conversation history
 
         # Add the user's turn to the conversation
-        conversation_history.append(("User", user_input))
+        conversation_history.append(('User', user_input))
 
         # We create a custom prompt template that includes
         # the entire conversation so far plus the newly retrieved context.
@@ -940,7 +1025,7 @@ def chat_with_model(config: ChatAppConfig) -> None:
         )
 
         # Ask the RAG model to generate a response
-        response_list = rag_model.generate(
+        response_list, metrics = rag_model.generate(
             texts=[user_input],  # retrieve only on the new user input
             prompt_template=conversation_template,
             retrieval_top_k=100,
@@ -951,34 +1036,36 @@ def chat_with_model(config: ChatAppConfig) -> None:
         response = response_list[0]
 
         # Add the model's response to the conversation
-        conversation_history.append(("Assistant", response))
+        conversation_history.append(('Assistant', response))
 
         # Print the model's response
         print(
-            f"Model: {response} \n --------------------------------------- \n",
+            f'Model: {response} \n --------------------------------------- \n',
         )
 
     # -------------------------------------------------------------------------
     # Write conversation history to a file with timestamp.
     # -------------------------------------------------------------------------
-    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
     os.makedirs(config.save_conversation_path, exist_ok=True)
-    filename = f"{config.save_conversation_path}/conversation_{timestamp_str}.txt"
+    filename = (
+        f'{config.save_conversation_path}/conversation_{timestamp_str}.txt'
+    )
     try:
-        with open(filename, "w", encoding="utf-8") as f:
+        with open(filename, 'w', encoding='utf-8') as f:
             for speaker, text in conversation_history:
-                f.write(f"{speaker}: {text}\n")
-        print(f"Conversation saved to {filename}")
+                f.write(f'{speaker}: {text}\n')
+        print(f'Conversation saved to {filename}')
     except Exception as e:
-        print(f"Error writing conversation to file: {e}")
+        print(f'Error writing conversation to file: {e}')
 
 
 # -----------------------------------------------------------------------------
 # CLI Entry Point
 # -----------------------------------------------------------------------------
-if __name__ == "__main__":
+if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument('--config', type=Path, required=True)
     args = parser.parse_args()
 
     # Load the configuration
