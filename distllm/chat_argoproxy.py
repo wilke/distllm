@@ -170,7 +170,7 @@ class VLLMGenerator:
                 {'role': 'user', 'content': prompt},
             ],
             'temperature': temp_to_use,
-            'max_tokens': tokens_to_use,
+            'max_completion_tokens': tokens_to_use,
         }
 
         t0 = time.perf_counter()
@@ -223,7 +223,7 @@ class VLLMGenerator:
                 {'role': 'user', 'content': prompt},
             ],
             'temperature': temp_to_use,
-            'max_tokens': tokens_to_use,
+            'max_completion_tokens': tokens_to_use,
             'stream': True,
         }
 
@@ -336,7 +336,7 @@ class ArgoGenerator:
                 model=self.model,
                 messages=messages,
                 temperature=temp_to_use,
-                max_tokens=tokens_to_use,
+                max_completion_tokens=tokens_to_use,
             )
             total_latency_s = time.perf_counter() - t0
             result = response.choices[0].message.content
@@ -375,7 +375,7 @@ class ArgoGenerator:
                 model=self.model,
                 messages=messages,
                 temperature=temp_to_use,
-                max_tokens=tokens_to_use,
+                max_completion_tokens=tokens_to_use,
                 stream=True,
             )
             for chunk in stream:
@@ -491,7 +491,9 @@ class OpenAIAPIGenerator:
                     f'DEBUG: Response content is None. Finish reason: {finish_reason}'
                 )
                 print(f'DEBUG: Full response structure: {response}')
-                content = f'[No content returned. Finish reason: {finish_reason}]'
+                content = (
+                    f'[No content returned. Finish reason: {finish_reason}]'
+                )
 
             # Debug: check if content is empty string
             if content == '':
