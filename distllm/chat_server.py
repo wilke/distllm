@@ -7,8 +7,8 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import AsyncGenerator
 from typing import Iterable
+from typing import Iterator
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -22,11 +22,13 @@ from pydantic import Field
 
 from distllm.chat_argoproxy import ChatAppConfig
 from distllm.chat_argoproxy import ConversationPromptTemplate
+from distllm.chat_argoproxy import inspect_retrieval_results
 
 # Load environment variables upfront so config paths/API keys can come from .env
 load_dotenv()
 
 CONFIG_ENV_VAR = 'DISTLLM_CHAT_CONFIG'
+MODEL_NAME = os.getenv('OPENAI_MODEL_NAME', 'distllm-rag')
 DEFAULT_TOP_K = int(os.getenv('DISTLLM_CHAT_RETRIEVAL_TOP_K', '20'))
 DEFAULT_SCORE_THRESHOLD = float(
     os.getenv('DISTLLM_CHAT_SCORE_THRESHOLD', '0.1'),
@@ -166,42 +168,59 @@ def _build_response_payload(
 
 
 def _stream_response(
-    payload: ChatCompletionResponse,
-) -> AsyncGenerator[str, None]:
-    """Convert a JSON payload into an SSE stream with a single delta."""
-    chunk = {
-        'id': payload.id,
+    *,
+    response_id: str,
+    created: int,
+    model: str,
+    text_deltas: Iterable[str],
+) -> Iterator[str]:
+    """Convert text deltas into OpenAI-compatible SSE chat chunks."""
+    role_chunk = {
+        'id': response_id,
         'object': 'chat.completion.chunk',
-        'created': payload.created,
-        'model': payload.model,
+        'created': created,
+        'model': model,
         'choices': [
             {
                 'index': 0,
-                'delta': payload.choices[0].message,
+                'delta': {'role': 'assistant'},
                 'finish_reason': None,
             },
         ],
     }
+    yield f'data: {json.dumps(role_chunk)}\n\n'
+
+    for delta_text in text_deltas:
+        chunk = {
+            'id': response_id,
+            'object': 'chat.completion.chunk',
+            'created': created,
+            'model': model,
+            'choices': [
+                {
+                    'index': 0,
+                    'delta': {'content': delta_text},
+                    'finish_reason': None,
+                },
+            ],
+        }
+        yield f'data: {json.dumps(chunk)}\n\n'
+
     final_chunk = {
-        'id': payload.id,
+        'id': response_id,
         'object': 'chat.completion.chunk',
-        'created': payload.created,
-        'model': payload.model,
+        'created': created,
+        'model': model,
         'choices': [
             {
                 'index': 0,
                 'delta': {},
-                'finish_reason': payload.choices[0].finish_reason,
+                'finish_reason': 'stop',
             },
         ],
     }
-
-    async def generator() -> AsyncGenerator[str, None]:
-        yield f'data: {json.dumps(chunk)}\n\n'
-        yield f'data: {json.dumps(final_chunk)}\n\n'
-        yield 'data: [DONE]\n\n'
-
-    return generator()
+    yield f'data: {json.dumps(final_chunk)}\n\n'
+    yield 'data: [DONE]\n\n'
 
 
 @app.on_event('startup')
@@ -214,6 +233,76 @@ def _startup() -> None:
 def health() -> dict[str, str]:
     """Simple readiness probe."""
     return {'status': 'ok'}
+
+
+@app.get('/v1/models')
+def list_models():
+    """OpenAI-compatible model listing so Open WebUI can discover this server."""
+    return {
+        'object': 'list',
+        'data': [
+            {
+                'id': MODEL_NAME,
+                'object': 'model',
+                'created': int(time.time()),
+                'owned_by': 'distllm',
+            },
+        ],
+    }
+
+
+class DebugQueryRequest(BaseModel):
+    query: str
+    top_k: int = Field(default=5, gt=0)
+    score_threshold: float = 0.1
+
+
+@app.post('/v1/debug/query')
+async def debug_query(request: DebugQueryRequest):
+    """Return retrieval results and the assembled prompt without calling the LLM.
+
+    Useful for verifying that (a) retrieval finds relevant documents and
+    (b) the prompt is correctly constructed before generation.
+    """
+    rag_model = _load_rag_model()
+    retriever = rag_model.retriever
+    if retriever is None:
+        raise HTTPException(status_code=500, detail='No retriever configured.')
+
+    detailed = await run_in_threadpool(
+        inspect_retrieval_results,
+        retriever,
+        request.query,
+        request.top_k,
+        request.score_threshold,
+    )
+
+    contexts = [
+        [
+            doc['attributes'].get('text', '')
+            for doc in detailed['retrieved_documents']
+        ],
+    ]
+    scores = [[doc['score'] for doc in detailed['retrieved_documents']]]
+    prompt_template = ConversationPromptTemplate([('User', request.query)])
+    prompts = prompt_template.preprocess([request.query], contexts, scores)
+
+    return JSONResponse({
+        'query': request.query,
+        'query_embedding_shape': list(detailed['query_embedding_shape']),
+        'num_retrieved': detailed['num_results'],
+        'retrieved_documents': [
+            {
+                'rank': doc['rank'],
+                'score': float(doc['score']),
+                'text_preview': doc['attributes'].get('text', '')[:500],
+            }
+            for doc in detailed['retrieved_documents']
+        ],
+        'assembled_prompt_preview': prompts[0][:2000],
+        'prompt_contains_context': '[Context from retrieval]' in prompts[0],
+        'prompt_length_chars': len(prompts[0]),
+    })
 
 
 @app.post('/v1/chat/completions')
@@ -243,6 +332,31 @@ async def chat_completions(
     if retrieval_score_threshold is None:
         retrieval_score_threshold = DEFAULT_SCORE_THRESHOLD
 
+    if request.stream:
+        model_name = request.model or getattr(rag_model.generator, 'model', 'unknown')
+        response_id = f'chatcmpl-{uuid.uuid4()}'
+        created = int(time.time())
+
+        text_deltas = await run_in_threadpool(
+            rag_model.generate_stream,
+            [latest_user_message],
+            prompt_template,
+            retrieval_top_k,
+            retrieval_score_threshold,
+            max_tokens,
+            temperature,
+            DEFAULT_DEBUG_RETRIEVAL,
+        )
+        return StreamingResponse(
+            _stream_response(
+                response_id=response_id,
+                created=created,
+                model=model_name,
+                text_deltas=text_deltas,
+            ),
+            media_type='text/event-stream',
+        )
+
     response_list = await run_in_threadpool(
         rag_model.generate,
         [latest_user_message],
@@ -260,11 +374,5 @@ async def chat_completions(
         or getattr(rag_model.generator, 'model', 'unknown'),
         assistant_message=assistant_response,
     )
-
-    if request.stream:
-        return StreamingResponse(
-            _stream_response(payload),
-            media_type='text/event-stream',
-        )
 
     return JSONResponse(payload.model_dump())

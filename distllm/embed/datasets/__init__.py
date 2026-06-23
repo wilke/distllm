@@ -10,6 +10,7 @@ from distllm.embed.datasets.fasta import FastaDataset
 from distllm.embed.datasets.fasta import FastaDatasetConfig
 from distllm.embed.datasets.huggingface import HuggingFaceDataset
 from distllm.embed.datasets.huggingface import HuggingFaceDatasetConfig
+from distllm.embed.datasets.jsonl import EmptyDatasetError
 from distllm.embed.datasets.jsonl import JsonlDataset
 from distllm.embed.datasets.jsonl import JsonlDatasetConfig
 from distllm.embed.datasets.jsonl_chunk import JsonlChunkDataset

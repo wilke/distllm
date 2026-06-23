@@ -16,6 +16,73 @@ from transformers import PreTrainedTokenizer
 
 from distllm.utils import BaseConfig
 
+# Flag to track if patch has been applied in this process
+_COMPUTE_TM_PATCHED = False
+
+
+def _patch_esmfold_compute_tm() -> None:
+    """Patch ESMFold's compute_tm to handle half-precision edge cases.
+
+    The original compute_tm function in transformers can fail with
+    IndexError when using half precision due to numerical instability
+    causing NaN values. This patch adds graceful handling for that case.
+
+    Since we only need embeddings (not pTM scores), returning a default
+    value when the computation fails is acceptable.
+
+    This function is idempotent - safe to call multiple times.
+
+    IMPORTANT: We must patch BOTH locations:
+    1. transformers.models.esm.openfold_utils.loss.compute_tm
+    2. transformers.models.esm.modeling_esmfold.compute_tm
+    Because modeling_esmfold imports compute_tm directly at module level.
+    """
+    global _COMPUTE_TM_PATCHED
+    if _COMPUTE_TM_PATCHED:
+        return
+
+    try:
+        from transformers.models.esm.openfold_utils import loss as openfold_loss
+        from transformers.models.esm import modeling_esmfold
+    except ImportError:
+        return  # Old transformers version, skip patching
+
+    # Check if already patched (in case flag was reset)
+    if hasattr(modeling_esmfold.compute_tm, '_is_patched'):
+        _COMPUTE_TM_PATCHED = True
+        return
+
+    # Store original function (from the source module)
+    _original_compute_tm = openfold_loss.compute_tm
+
+    def _safe_compute_tm(
+        logits: torch.Tensor,
+        max_bin: int = 31,
+        no_bins: int = 64,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        """Compute TM-score with graceful handling for numerical edge cases."""
+        try:
+            return _original_compute_tm(
+                logits, max_bin=max_bin, no_bins=no_bins, **kwargs,
+            )
+        except IndexError:
+            # Half-precision numerical instability caused empty nonzero result
+            # Return a default pTM of 0.0 (we don't use this value anyway)
+            batch_size = logits.shape[0]
+            return torch.zeros(batch_size, device=logits.device, dtype=logits.dtype)
+
+    # Mark as patched
+    _safe_compute_tm._is_patched = True  # type: ignore[attr-defined]
+
+    # Apply the patch to BOTH locations
+    # 1. The source module (for any other imports)
+    openfold_loss.compute_tm = _safe_compute_tm
+    # 2. The modeling_esmfold module (where EsmForProteinFolding.forward calls it)
+    modeling_esmfold.compute_tm = _safe_compute_tm
+
+    _COMPUTE_TM_PATCHED = True
+
 
 class EsmFoldTokenizerWrapper:
     """Wrapper for ESMFold tokenizer that disables special tokens.
@@ -62,12 +129,19 @@ class EsmFoldEncoderConfig(BaseConfig):
     name: Literal['esmfold'] = 'esmfold'  # type: ignore[assignment]
     # The model id (HuggingFace model)
     pretrained_model_name_or_path: str = 'facebook/esmfold_v1'
-    # Use half precision (recommended for H100s)
+    # Use half precision for memory efficiency.
+    # IMPORTANT: When True, uses BFLOAT16 (not float16) because ESMFold
+    # has severe numerical instability with float16 (produces 100% NaN).
+    # BF16 has the same memory footprint as FP16 but better numerical range.
+    # Requires GPU with BF16 support (e.g., A100, H100, RTX 30/40 series).
     half_precision: bool = True
     # Set the model to evaluation mode
     eval_mode: bool = True
     # Maximum sequence length (ESMFold can handle up to 2048)
     max_length: int = 1024
+    # Minimum sequence length (sequences shorter than this will raise error)
+    # ESMFold's pTM computation can fail on very short sequences
+    min_length: int = 10
     # Which representation to extract:
     # - 'states': hidden states from folding trunk (STRUCTURE, recommended)
     # - 's_z': pairwise residue embeddings (STRUCTURE, 2D relationships)
@@ -107,6 +181,10 @@ class EsmFoldEncoder:
 
     def __init__(self, config: EsmFoldEncoderConfig) -> None:
         """Initialize the ESMFold encoder."""
+        # IMPORTANT: Apply the compute_tm patch BEFORE importing ESMFold model
+        # This fixes half-precision numerical instability in pTM computation
+        _patch_esmfold_compute_tm()
+
         from transformers import AutoTokenizer
         from transformers import EsmForProteinFolding
 
@@ -120,8 +198,11 @@ class EsmFoldEncoder:
             model.config.num_recycles = config.num_recycles
 
         # Convert to half precision if requested
+        # IMPORTANT: Use bfloat16, NOT float16!
+        # ESMFold produces 100% NaN with float16 due to numerical instability.
+        # BF16 has the same memory footprint but better numerical range.
         if config.half_precision:
-            model.half()
+            model.to(torch.bfloat16)
 
         # Set to evaluation mode
         if config.eval_mode:
@@ -147,16 +228,23 @@ class EsmFoldEncoder:
         self._tokenizer = wrapped_tokenizer
         self._representation = config.representation
         self._multi_representation = config.multi_representation
+        self._min_length = config.min_length
+        self._num_recycles = config.num_recycles or model.config.num_recycles
 
         # Cache embedding sizes for different representations
+        # NOTE: ESMFold has two different hidden dimensions:
+        # - sequence_state_dim (1024): ESM-2 trunk / s_s embeddings
+        # - structure_module.sequence_dim (384): folding trunk states
         trunk_config = model.config.esmfold_config.trunk
+        structure_config = trunk_config.structure_module  # Nested inside trunk
         self._embedding_sizes = {
-            'states': trunk_config.sequence_state_dim,  # Folding trunk hidden
-            's_z': trunk_config.pairwise_state_dim,     # Pairwise embeddings
-            's_s': trunk_config.sequence_state_dim,     # ESM-2 projected
+            # states comes from structure_module, uses its sequence_dim
+            'states': structure_config.sequence_dim,  # 384 for ESMFold v1
+            's_z': trunk_config.pairwise_state_dim,   # 128 for pairwise
+            's_s': trunk_config.sequence_state_dim,   # 1024 for ESM-2 stem
             # Combined = states + s_z concatenated
             'combined': (
-                trunk_config.sequence_state_dim + trunk_config.pairwise_state_dim
+                structure_config.sequence_dim + trunk_config.pairwise_state_dim
             ),
         }
 
@@ -211,31 +299,78 @@ class EsmFoldEncoder:
                 (shape: [num_sequences, sequence_length, embedding_size])
             If multi_representation=True: dict with 'structure' and 'pairwise'
                 keys, each containing a tensor.
+
+        Raises
+        ------
+        ValueError
+            If any sequence is shorter than min_length.
+        RuntimeError
+            If ESMFold's pTM computation fails (usually due to numerical
+            instability with half precision or edge case sequences).
         """
         # Move inputs to device
         input_ids = batch_encoding['input_ids'].to(self.device)
         attention_mask = batch_encoding['attention_mask'].to(self.device)
 
+        # Check minimum sequence length (ESMFold pTM can fail on short seqs)
+        seq_lengths = attention_mask.sum(dim=1)
+        min_seq_len = seq_lengths.min().item()
+        if min_seq_len < self._min_length:
+            raise ValueError(
+                f'Sequence length {min_seq_len} is below minimum '
+                f'{self._min_length}. ESMFold pTM computation may fail on '
+                f'very short sequences. Filter out sequences shorter than '
+                f'{self._min_length} residues or set min_length in config.',
+            )
+
         # Forward pass through ESMFold (includes structure prediction)
-        with torch.no_grad():
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
+        try:
+            with torch.no_grad():
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
+        except IndexError as e:
+            # Known issue: ESMFold's compute_tm can fail with numerical
+            # instability, especially with half precision
+            if 'index 0 is out of bounds' in str(e):
+                raise RuntimeError(
+                    'ESMFold pTM computation failed. This is often caused by '
+                    'numerical instability with half precision. Try setting '
+                    'half_precision: false in encoder_config, or check for '
+                    'problematic sequences (very short, unusual amino acids).',
+                ) from e
+            raise
+
+        # Extract embeddings from the FINAL recycle iteration (best quality)
+        # states has shape [num_recycles, batch, seq_len, hidden_dim]
+        # We want the last recycle: states[-1] -> [batch, seq_len, hidden_dim]
+        batch_size = attention_mask.shape[0]
+        final_states = self._extract_final_recycle_states(
+            outputs.states,
+            batch_size,
             )
 
         # Multi-representation mode: return both as dict
         if self._multi_representation:
+            structure_emb = final_states  # [B, L, 384]
+            pairwise_emb = outputs.s_z.mean(dim=2)  # [B, L, 128]
+
+            # Check for NaN values (can happen with FP16)
+            self._check_nan(structure_emb, 'structure')
+            self._check_nan(pairwise_emb, 'pairwise')
+
             return {
-                'structure': outputs.states,  # [B, L, 1024]
-                'pairwise': outputs.s_z.mean(dim=2),  # [B, L, 128]
+                'structure': structure_emb,
+                'pairwise': pairwise_emb,
             }
 
         # Single representation mode
         if self._representation == 'states':
             # Hidden states from the FOLDING TRUNK (structure module)
             # These encode 3D structural information after iterative refinement
-            # Shape: [batch, seq_len, sequence_state_dim]
-            embeddings = outputs.states
+            # Shape: [batch, seq_len, 384] (structure_module.sequence_dim)
+            embeddings = final_states
         elif self._representation == 's_z':
             # Pairwise residue embeddings (structural relationships)
             # Shape: [batch, seq_len, seq_len, pairwise_state_dim]
@@ -244,15 +379,15 @@ class EsmFoldEncoder:
             embeddings = outputs.s_z.mean(dim=2)
         elif self._representation == 'combined':
             # BOTH structure representations concatenated
-            # states: [batch, seq_len, sequence_state_dim]
-            # s_z pooled: [batch, seq_len, pairwise_state_dim]
-            # -> [batch, seq_len, sequence_state_dim + pairwise_state_dim]
-            states = outputs.states
+            # states: [batch, seq_len, 384]
+            # s_z pooled: [batch, seq_len, 128]
+            # -> [batch, seq_len, 512]
             s_z_pooled = outputs.s_z.mean(dim=2)
-            embeddings = torch.cat([states, s_z_pooled], dim=-1)
+            embeddings = torch.cat([final_states, s_z_pooled], dim=-1)
         elif self._representation == 's_s':
             # ESM-2 stem embeddings (sequence-based, NOT structure)
             # Only use if you specifically want sequence info
+            # Shape: [batch, seq_len, 1024]
             embeddings = outputs.s_s
         else:
             raise ValueError(
@@ -260,4 +395,97 @@ class EsmFoldEncoder:
                 f'Expected "states", "s_z", "combined", or "s_s".',
             )
 
+        # Check for NaN values (can happen with FP16)
+        self._check_nan(embeddings, self._representation)
+
         return embeddings
+
+    def _check_nan(self, tensor: torch.Tensor, name: str) -> None:
+        """Check for NaN values in tensor and log a warning if found.
+
+        Parameters
+        ----------
+        tensor : torch.Tensor
+            The tensor to check.
+        name : str
+            Name of the tensor for logging.
+        """
+        import sys
+
+        if torch.isnan(tensor).any():
+            nan_count = torch.isnan(tensor).sum().item()
+            total = tensor.numel()
+            print(
+                f'[WARNING] ESMFold {name} embeddings contain '
+                f'{nan_count}/{total} NaN values. '
+                f'This is often caused by FP16 numerical instability. '
+                f'Consider using half_precision: false.',
+                file=sys.stderr,
+            )
+
+    def _extract_final_recycle_states(
+        self,
+        states: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """Extract the final recycle's states from the ESMFold output.
+
+        ESMFold outputs states from ALL recycling iterations. The states
+        tensor has shape [num_recycles, batch, seq_len, hidden_dim] or may
+        be reshaped to [num_recycles * batch, seq_len, hidden_dim].
+
+        We extract only the final recycle (index -1) which represents the
+        most refined structure prediction.
+
+        Parameters
+        ----------
+        states : torch.Tensor
+            The states tensor from ESMFold outputs.
+        batch_size : int
+            The actual batch size (from attention_mask).
+
+        Returns
+        -------
+        torch.Tensor
+            States from the final recycle iteration.
+            Shape: [batch_size, seq_len, hidden_dim]
+        """
+        # Handle different possible shapes from ESMFold
+        if states.dim() == 4:
+            # Shape: [num_recycles, batch, seq_len, hidden_dim]
+            # Take the last recycle
+            return states[-1]
+        elif states.dim() == 3:
+            # Shape: [num_recycles * batch, seq_len, hidden_dim]
+            # Need to reshape and extract final recycle
+            total_samples = states.shape[0]
+            num_recycles = total_samples // batch_size
+
+            if num_recycles * batch_size != total_samples:
+                # If it doesn't divide evenly, states might already be
+                # just the final recycle or have unexpected format
+                if total_samples == batch_size:
+                    # Already just one recycle's worth
+                    return states
+                raise ValueError(
+                    f'Unexpected states shape {states.shape}. Expected '
+                    f'[num_recycles * batch, seq_len, hidden] where '
+                    f'batch={batch_size}, but got {total_samples} samples.',
+                )
+
+            # Reshape to [num_recycles, batch, seq_len, hidden_dim]
+            seq_len = states.shape[1]
+            hidden_dim = states.shape[2]
+            states_reshaped = states.view(
+                num_recycles,
+                batch_size,
+                seq_len,
+                hidden_dim,
+            )
+            # Take the final recycle
+            return states_reshaped[-1]
+        else:
+            raise ValueError(
+                f'Unexpected states tensor with {states.dim()} dimensions. '
+                f'Expected 3 or 4 dimensions, got shape {states.shape}.',
+            )

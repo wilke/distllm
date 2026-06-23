@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
+from typing import Any
+from typing import Iterator
 
 import numpy as np
 import openai
@@ -23,7 +26,6 @@ from distllm.utils import BaseConfig
 
 # Load environment variables
 load_dotenv()
-
 
 
 # -----------------------------------------------------------------------------
@@ -144,8 +146,15 @@ class VLLMGenerator:
         prompt: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
-    ) -> str:
-        """Send a prompt to the local vLLM server and return the completion."""
+    ) -> dict[str, Any]:
+        """Send a prompt to the local vLLM server and return the completion.
+
+        Returns a dict with keys:
+            text: the generated text
+            prompt_tokens: number of tokens in the prompt
+            completion_tokens: number of tokens in the completion
+            total_latency_s: wall-clock seconds for the request
+        """
         temp_to_use = self.temperature if temperature is None else temperature
         tokens_to_use = self.max_tokens if max_tokens is None else max_tokens
 
@@ -161,21 +170,90 @@ class VLLMGenerator:
                 {'role': 'user', 'content': prompt},
             ],
             'temperature': temp_to_use,
-            'max_tokens': tokens_to_use,
+            'max_completion_tokens': tokens_to_use,
         }
 
+        t0 = time.perf_counter()
         response = requests.post(
             url,
             headers=headers,
             data=json.dumps(payload),
         )
+        total_latency_s = time.perf_counter() - t0
+
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+
         if response.status_code == 200:  # noqa: PLR2004
-            result = response.json()['choices'][0]['message']['content']
+            resp_json = response.json()
+            result = resp_json['choices'][0]['message']['content']
+            usage = resp_json.get('usage', {})
+            prompt_tokens = usage.get('prompt_tokens')
+            completion_tokens = usage.get('completion_tokens')
         else:
             print(f'Error: {response.status_code}')
             result = response.text
 
-        return result
+        return {
+            'text': result,
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_latency_s': round(total_latency_s, 4),
+        }
+
+    def generate_stream(
+        self,
+        prompt: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> Iterator[str]:
+        """Stream text deltas from the vLLM-compatible OpenAI endpoint."""
+        temp_to_use = self.temperature if temperature is None else temperature
+        tokens_to_use = self.max_tokens if max_tokens is None else max_tokens
+
+        url = f'http://{self.server}.cels.anl.gov:{self.port}/v1/chat/completions'
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {self.api_key}',
+        }
+        payload = {
+            'model': self.model,
+            'messages': [
+                {'role': 'system', 'content': 'You are a helpful assistant.'},
+                {'role': 'user', 'content': prompt},
+            ],
+            'temperature': temp_to_use,
+            'max_completion_tokens': tokens_to_use,
+            'stream': True,
+        }
+
+        with requests.post(
+            url,
+            headers=headers,
+            data=json.dumps(payload),
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                line = raw_line.strip()
+                if not line.startswith('data: '):
+                    continue
+                data = line[6:]
+                if data == '[DONE]':
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get('choices', [])
+                if not choices:
+                    continue
+                delta = choices[0].get('delta', {})
+                text_delta = delta.get('content')
+                if text_delta:
+                    yield text_delta
 
 
 class ArgoGeneratorConfig(BaseConfig):
@@ -232,8 +310,58 @@ class ArgoGenerator:
         prompt: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
-    ) -> str:
-        """Send a prompt to the Argo proxy and return the completion."""
+    ) -> dict[str, Any]:
+        """Send a prompt to the Argo proxy and return the completion.
+
+        Returns a dict with keys:
+            text: the generated text
+            prompt_tokens: number of tokens in the prompt
+            completion_tokens: number of tokens in the completion
+            total_latency_s: wall-clock seconds for the request
+        """
+        temp_to_use = self.temperature if temperature is None else temperature
+        tokens_to_use = self.max_tokens if max_tokens is None else max_tokens
+
+        messages = [
+            {'role': 'system', 'content': 'You are a helpful assistant.'},
+            {'role': 'user', 'content': prompt},
+        ]
+
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+
+        t0 = time.perf_counter()
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temp_to_use,
+                max_completion_tokens=tokens_to_use,
+            )
+            total_latency_s = time.perf_counter() - t0
+            result = response.choices[0].message.content
+            if response.usage is not None:
+                prompt_tokens = response.usage.prompt_tokens
+                completion_tokens = response.usage.completion_tokens
+        except Exception as e:
+            total_latency_s = time.perf_counter() - t0
+            print(f'Error calling Argo proxy: {e}')
+            result = f'Error: {e!s}'
+
+        return {
+            'text': result,
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_latency_s': round(total_latency_s, 4),
+        }
+
+    def generate_stream(
+        self,
+        prompt: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> Iterator[str]:
+        """Stream text deltas from Argo proxy in OpenAI format."""
         temp_to_use = self.temperature if temperature is None else temperature
         tokens_to_use = self.max_tokens if max_tokens is None else max_tokens
 
@@ -243,18 +371,23 @@ class ArgoGenerator:
         ]
 
         try:
-            response = self.client.chat.completions.create(
+            stream = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=temp_to_use,
-                max_tokens=tokens_to_use,
+                max_completion_tokens=tokens_to_use,
+                stream=True,
             )
-            result = response.choices[0].message.content
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                text_delta = delta.content if delta else None
+                if text_delta:
+                    yield text_delta
         except Exception as e:
-            print(f'Error calling Argo proxy: {e}')
-            result = f'Error: {e!s}'
-
-        return result
+            print(f'Error calling Argo proxy (stream): {e}')
+            yield f'Error: {e!s}'
 
 
 # Directly use the OpenAI API, instead of the argo-proxy models.
@@ -264,21 +397,21 @@ class OpenAIAPIGeneratorConfig(BaseConfig):
     """
 
     model: str = Field(
-        default_factory=lambda: os.getenv("OPENAI_MODEL", "gpt-4.1"),
-        description="OpenAI model name",
+        default_factory=lambda: os.getenv('OPENAI_MODEL', 'gpt-4.1'),
+        description='OpenAI model name',
     )
     api_key: str = Field(
-        default_factory=lambda: os.getenv("OPENAI_API_KEY"),
-        description="OpenAI API key",
+        default_factory=lambda: os.getenv('OPENAI_API_KEY'),
+        description='OpenAI API key',
     )
     base_url: str | None = Field(
-        default_factory=lambda: os.getenv("OPENAI_BASE_URL", None),
-        description="Optional: override OpenAI base URL (e.g., Azure)",
+        default_factory=lambda: os.getenv('OPENAI_BASE_URL', None),
+        description='Optional: override OpenAI base URL (e.g., Azure)',
     )
     temperature: float = Field(0.0)
     max_tokens: int = Field(16384)
 
-    def get_generator(self) -> "OpenAIAPIGenerator":
+    def get_generator(self) -> 'OpenAIAPIGenerator':
         return OpenAIAPIGenerator(config=self)
 
 
@@ -313,15 +446,27 @@ class OpenAIAPIGenerator:
         prompt: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
-    ) -> str:
+    ) -> dict[str, Any]:
+        """Send a prompt to the OpenAI API and return the completion.
+
+        Returns a dict with keys:
+            text: the generated text
+            prompt_tokens: number of tokens in the prompt
+            completion_tokens: number of tokens in the completion
+            total_latency_s: wall-clock seconds for the request
+        """
         temperature = self.temperature if temperature is None else temperature
         max_tokens = self.max_tokens if max_tokens is None else max_tokens
 
         messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": prompt},
+            {'role': 'system', 'content': 'You are a helpful assistant.'},
+            {'role': 'user', 'content': prompt},
         ]
 
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+
+        t0 = time.perf_counter()
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -329,29 +474,79 @@ class OpenAIAPIGenerator:
                 temperature=temperature,
                 max_completion_tokens=max_tokens,
             )
+            total_latency_s = time.perf_counter() - t0
+
+            if response.usage is not None:
+                prompt_tokens = response.usage.prompt_tokens
+                completion_tokens = response.usage.completion_tokens
+
             content = response.choices[0].message.content
-            
+
             # Handle case where content might be None
             if content is None:
                 # Check finish reason to understand why content is None
                 finish_reason = response.choices[0].finish_reason
                 # Debug: print full response structure for diagnosis
-                print(f"DEBUG: Response content is None. Finish reason: {finish_reason}")
-                print(f"DEBUG: Full response structure: {response}")
-                return f"[No content returned. Finish reason: {finish_reason}]"
-            
+                print(
+                    f'DEBUG: Response content is None. Finish reason: {finish_reason}'
+                )
+                print(f'DEBUG: Full response structure: {response}')
+                content = (
+                    f'[No content returned. Finish reason: {finish_reason}]'
+                )
+
             # Debug: check if content is empty string
-            if content == "":
+            if content == '':
                 finish_reason = response.choices[0].finish_reason
-                print(f"DEBUG: Response content is empty string. Finish reason: {finish_reason}")
-            
-            return content
+                print(
+                    f'DEBUG: Response content is empty string. Finish reason: {finish_reason}'
+                )
 
         except Exception as e:
-            print(f"Error calling OpenAI API: {e}")
-            return f"Error: {e}"
+            total_latency_s = time.perf_counter() - t0
+            print(f'Error calling OpenAI API: {e}')
+            content = f'Error: {e}'
 
+        return {
+            'text': content,
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_latency_s': round(total_latency_s, 4),
+        }
 
+    def generate_stream(
+        self,
+        prompt: str,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> Iterator[str]:
+        """Stream text deltas directly from the OpenAI API."""
+        temperature = self.temperature if temperature is None else temperature
+        max_tokens = self.max_tokens if max_tokens is None else max_tokens
+
+        messages = [
+            {'role': 'system', 'content': 'You are a helpful assistant.'},
+            {'role': 'user', 'content': prompt},
+        ]
+
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_completion_tokens=max_tokens,
+                stream=True,
+            )
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                text_delta = delta.content if delta else None
+                if text_delta:
+                    yield text_delta
+        except Exception as e:
+            print(f'Error calling OpenAI API (stream): {e}')
+            yield f'Error: {e}'
 
 
 class RagGenerator:
@@ -480,13 +675,71 @@ class RagGenerator:
 
         # We only expect one output per query for now
         # (If multiple texts were passed, we would loop.)
-        result = self.generator.generate(
+        gen_result = self.generator.generate(
             prompt=prompts[0],
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        # Return as list (matching the function signature)
-        return [result]
+        # gen_result is a dict with text, prompt_tokens, completion_tokens,
+        # total_latency_s
+        metrics = {
+            'prompt_tokens': gen_result['prompt_tokens'],
+            'completion_tokens': gen_result['completion_tokens'],
+            'total_latency_s': gen_result['total_latency_s'],
+        }
+        # Return response list and metrics
+        return [gen_result['text']], metrics
+
+    def generate_stream(  # noqa: PLR0913
+        self,
+        texts: str | list[str],
+        prompt_template: PromptTemplate = None,
+        retrieval_top_k: int = 5,
+        retrieval_score_threshold: float = 0.0,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        debug_retrieval: bool = False,
+    ) -> Iterator[str]:
+        """Generate a streaming response to the given query."""
+        if isinstance(texts, str):
+            texts = [texts]
+
+        if prompt_template is None:
+            prompt_template = IdentityPromptTemplate(
+                IdentityPromptTemplateConfig(),
+            )
+
+        contexts, scores = None, None
+        if self.retriever is not None:
+            results, _ = self.retriever.search(
+                texts,
+                top_k=retrieval_top_k,
+                score_threshold=retrieval_score_threshold,
+            )
+
+            if debug_retrieval:
+                print('=' * 80)
+                print('🔍 RETRIEVAL DEBUG INFORMATION')
+                print('=' * 80)
+                print(f'Query: {texts[0]}')
+                print(f'Retrieved {len(results.total_indices[0])} documents')
+                print()
+
+            contexts = [
+                self.retriever.get_texts(indices)
+                for indices in results.total_indices
+            ]
+            scores = results.total_scores
+
+        prompts = prompt_template.preprocess(texts, contexts, scores)
+        if self.verbose and contexts:
+            print(contexts[0][0] + '\n\n')
+
+        yield from self.generator.generate_stream(
+            prompt=prompts[0],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -495,7 +748,9 @@ class RagGenerator:
 class RetrievalAugmentedGenerationConfig(BaseConfig):
     """Configuration for the retrieval-augmented generation model."""
 
-    generator_config: VLLMGeneratorConfig | ArgoGeneratorConfig | OpenAIAPIGeneratorConfig = Field(
+    generator_config: (
+        VLLMGeneratorConfig | ArgoGeneratorConfig | OpenAIAPIGeneratorConfig
+    ) = Field(
         ...,
         description='Settings for the generator (VLLM or Argo)',
     )
@@ -514,38 +769,47 @@ class RetrievalAugmentedGenerationConfig(BaseConfig):
         """Handle _target_ field to instantiate the correct config class."""
         if isinstance(data, dict) and 'generator_config' in data:
             gen_config_data = data['generator_config']
-            
+
             # If generator_config is a dict with _target_ field, instantiate the correct class
-            if isinstance(gen_config_data, dict) and '_target_' in gen_config_data:
+            if (
+                isinstance(gen_config_data, dict)
+                and '_target_' in gen_config_data
+            ):
                 target_class_name = gen_config_data.pop('_target_')
-                
+
                 # Map class names to config classes
                 config_class_map = {
                     'VLLMGeneratorConfig': VLLMGeneratorConfig,
                     'ArgoGeneratorConfig': ArgoGeneratorConfig,
                     'OpenAIAPIGeneratorConfig': OpenAIAPIGeneratorConfig,
                 }
-                
+
                 if target_class_name not in config_class_map:
                     raise ValueError(
                         f'Unknown generator config class: {target_class_name}. '
                         f'Available: {list(config_class_map.keys())}',
                     )
-                
+
                 config_class = config_class_map[target_class_name]
-                
+
                 # Handle environment variable substitution (${env:VAR_NAME})
                 processed_data = {}
                 for key, value in gen_config_data.items():
-                    if isinstance(value, str) and value.startswith('${env:') and value.endswith('}'):
-                        env_var = value[6:-1]  # Extract VAR_NAME from ${env:VAR_NAME}
+                    if (
+                        isinstance(value, str)
+                        and value.startswith('${env:')
+                        and value.endswith('}')
+                    ):
+                        env_var = value[
+                            6:-1
+                        ]  # Extract VAR_NAME from ${env:VAR_NAME}
                         processed_data[key] = os.getenv(env_var, '')
                     else:
                         processed_data[key] = value
-                
+
                 # Instantiate the config class
                 data['generator_config'] = config_class(**processed_data)
-        
+
         return data
 
     def get_rag_model(self) -> RagGenerator:
@@ -763,11 +1027,11 @@ def chat_with_model(config: ChatAppConfig) -> None:
         )
 
         # Ask the RAG model to generate a response
-        response_list = rag_model.generate(
+        response_list, metrics = rag_model.generate(
             texts=[user_input],  # retrieve only on the new user input
             prompt_template=conversation_template,
-            retrieval_top_k=20,
-            retrieval_score_threshold=0.1,
+            retrieval_top_k=100,
+            retrieval_score_threshold=0.2,
             debug_retrieval=True,  # Enable debug mode to see retrieval details
         )
         # There's only one element in response_list

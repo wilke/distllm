@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import requests
@@ -137,8 +139,15 @@ class VLLMGenerator:
         prompt: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
-    ) -> str:
-        """Send a prompt to the local vLLM server and return the completion."""
+    ) -> dict[str, Any]:
+        """Send a prompt to the local vLLM server and return the completion.
+
+        Returns a dict with keys:
+            text: the generated text
+            prompt_tokens: number of tokens in the prompt
+            completion_tokens: number of tokens in the completion
+            total_latency_s: wall-clock seconds for the request
+        """
         temp_to_use = self.temperature if temperature is None else temperature
         tokens_to_use = self.max_tokens if max_tokens is None else max_tokens
 
@@ -157,18 +166,33 @@ class VLLMGenerator:
             'max_tokens': tokens_to_use,
         }
 
+        t0 = time.perf_counter()
         response = requests.post(
             url,
             headers=headers,
             data=json.dumps(payload),
         )
+        total_latency_s = time.perf_counter() - t0
+
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+
         if response.status_code == 200:  # noqa: PLR2004
-            result = response.json()['choices'][0]['message']['content']
+            resp_json = response.json()
+            result = resp_json['choices'][0]['message']['content']
+            usage = resp_json.get('usage', {})
+            prompt_tokens = usage.get('prompt_tokens')
+            completion_tokens = usage.get('completion_tokens')
         else:
             print(f'Error: {response.status_code}')
             result = response.text
 
-        return result
+        return {
+            'text': result,
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_latency_s': round(total_latency_s, 4),
+        }
 
 
 class RagGenerator:
@@ -297,13 +321,20 @@ class RagGenerator:
 
         # We only expect one output per query for now
         # (If multiple texts were passed, we would loop.)
-        result = self.generator.generate(
+        gen_result = self.generator.generate(
             prompt=prompts[0],
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        # Return as list (matching the function signature)
-        return [result]
+        # gen_result is a dict with text, prompt_tokens, completion_tokens,
+        # total_latency_s
+        metrics = {
+            'prompt_tokens': gen_result['prompt_tokens'],
+            'completion_tokens': gen_result['completion_tokens'],
+            'total_latency_s': gen_result['total_latency_s'],
+        }
+        # Return response list and metrics
+        return [gen_result['text']], metrics
 
 
 # -----------------------------------------------------------------------------
@@ -530,7 +561,7 @@ def chat_with_model(config: ChatAppConfig) -> None:
         )
 
         # Ask the RAG model to generate a response
-        response_list = rag_model.generate(
+        response_list, metrics = rag_model.generate(
             texts=[user_input],  # retrieve only on the new user input
             prompt_template=conversation_template,
             retrieval_top_k=20,

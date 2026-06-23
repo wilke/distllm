@@ -60,6 +60,27 @@ To 'chat' with a RAG dataset built with distllm, run the following command from 
 python chat.py --config ../examples/chat/your-config.yaml
 ```
 
+### Drive distllm RAG chat through Open WebUI
+
+You can reuse any of the example configs (e.g. `examples/chat/vllm_cancer_chat_config.yaml`) to expose the RAG pipeline through an OpenAI-compatible API that Open WebUI understands.
+
+1. Set the config path for the server:
+   ```bash
+   export DISTLLM_CHAT_CONFIG=/homes/ogokdemir/projects/distllm/examples/chat/vllm_cancer_chat_config.yaml
+   ```
+2. Start the FastAPI wrapper (the new dependencies are part of the base install):
+   ```bash
+   uvicorn distllm.chat_server:app --host 0.0.0.0 --port 7000
+   ```
+3. In Open WebUI (see the [project README](https://github.com/open-webui/open-webui?tab=readme-ov-file) for installation), add a custom model provider:
+   - Provider type: `OpenAI Compatible`
+   - Base URL: `http://<server-host>:7000`
+   - API key: any placeholder string (the server ignores it)
+   - Model name: anything descriptive, e.g. `distllm-rag`
+4. Start chatting inside Open WebUI; every prompt is routed to `chat_argoproxy` with retrieval using your pre-built FAISS datastore.
+
+The server reuses the `ConversationPromptTemplate` logic, so multi-turn context and retrieval work the same way they do in the terminal interface.
+
 To run smaller datasets on a single GPU, you can use the following command:
 ```bash
 distllm embed --encoder_name auto --pretrained_model_name_or_path pritamdeka/S-PubMedBert-MS-MARCO --data_path /lus/eagle/projects/FoundEpidem/braceal/projects/metric-rag/data/parsed_pdfs/LUCID.small.test/parsed_pdfs --data_extension jsonl --output_path cli_test_lucid --dataset_name jsonl_chunk --batch_size 512 --chunk_batch_size 512 --buffer_size 4 --pooler_name mean --embedder_name semantic_chunk --writer_name huggingface --quantization --eval_mode
